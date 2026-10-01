@@ -1,5 +1,5 @@
 // Package logger provides the one standard structured-JSON logger construction
-// shared by every Pixora service: dual output (stdout for 12-factor / container
+// shared by every service: dual output (stdout for 12-factor / container
 // log collection, plus a daily-rotated local file for debugging), buffered file
 // writes for throughput, and a consistent field encoding so log shippers don't
 // need per-service parsing rules.

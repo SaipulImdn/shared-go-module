@@ -1,9 +1,9 @@
 // Package recovery provides the one standard panic-recovery middleware shared by
-// every Pixora HTTP service. Applied as the outermost layer, it turns a panic in
+// every HTTP service. Applied as the outermost layer, it turns a panic in
 // any handler or inner middleware into:
 //   - a single structured error log (with the reqid request ID + a full stack), and
 //   - a clean 500 response in the {response_code, response_desc, response_data}
-//     envelope every Pixora service uses,
+//     envelope every service uses,
 //
 // instead of Go's default (a dropped connection and an unstructured stdlib stack
 // trace). http.ErrAbortHandler is re-panicked, never swallowed — it's the
@@ -19,7 +19,7 @@ import (
 	"github.com/SaipulImdn/pixora-module/reqid"
 )
 
-// body500 is the canonical Pixora 500 envelope. "ISE" = Internal Server Error.
+// body500 is the canonical HTTP 500 envelope. "ISE" = Internal Server Error.
 const body500 = `{"response_code":"ISE","response_desc":"Internal server error","response_data":null}`
 
 // Middleware returns the panic-recovery middleware. logger is required.

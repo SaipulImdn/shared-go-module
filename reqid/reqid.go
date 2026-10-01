@@ -1,10 +1,10 @@
 // Package reqid provides a single, shared convention for the distributed
-// tracing ID that flows through every Pixora service: axe-gateway-pixora
+// tracing ID that flows through every service: axe-gateway-pixora
 // generates or forwards it as the "X-Request-ID" header on every proxied
 // request; each backend service should read it (or generate one if it's
 // missing, e.g. for a direct/internal call that didn't come through the
 // gateway), log it on every request, and forward it on any outbound call it
-// makes to another Pixora service — so a single ID can be grepped across
+// makes to another service — so a single ID can be grepped across
 // every service's logs to reconstruct one request's full path.
 package reqid
 

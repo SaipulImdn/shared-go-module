@@ -1,12 +1,12 @@
 // Package accesslog provides the one standard structured HTTP access-log
-// middleware shared by every Pixora service. It standardizes:
+// middleware shared by every service. It standardizes:
 //   - reading/generating the distributed-tracing request ID (see the reqid
 //     package) and putting it in both the request context and the response
 //     header, so callers can propagate it to their own outbound calls;
 //   - a single structured log-field set across services, so a log shipper or
 //     a human grepping logs doesn't need per-service parsing rules;
 //   - extracting the {response_code, response_desc, response_data} envelope
-//     every Pixora service wraps its responses in, without re-implementing a
+//     every service wraps its responses in, without re-implementing a
 //     JSON scanner in each repo.
 package accesslog
 
@@ -145,7 +145,7 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 
 // extractClientIP reads the first X-Forwarded-For hop, falling back to
 // RemoteAddr. Unlike axe-gateway-pixora's edge-facing extractor, this doesn't
-// validate a trusted-proxy allowlist: every Pixora backend service sits
+// validate a trusted-proxy allowlist: every backend service sits
 // behind the gateway on an internal cluster network and is not
 // internet-facing, so there's no untrusted hop between the client and here
 // worth defending against at this layer.

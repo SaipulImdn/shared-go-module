@@ -1,5 +1,5 @@
 // Package health provides the standard liveness and readiness HTTP handlers for
-// Pixora services.
+// services.
 //
 //   - Liveness ("/health"): a static 200. Must never depend on a downstream, or
 //     a transient DB/Redis blip would make Kubernetes kill an otherwise-fine pod.

@@ -1,5 +1,5 @@
 // Package metrics provides the one standard set of HTTP-request Prometheus
-// metrics shared by every Pixora service — request counts, latency, response
+// metrics shared by every service — request counts, latency, response
 // codes, and active-connection tracking. Metric NAMES stay per-service
 // (via Config.Prefix) since every service is scraped into the same
 // Prometheus/Grafana stack and existing dashboards key off e.g.
