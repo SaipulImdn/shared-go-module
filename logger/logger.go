@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/SaipulImdn/pixora-module/transactionlog"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -119,13 +120,15 @@ func parseLevel(level string) zapcore.Level {
 
 func newEncoderConfig() zapcore.EncoderConfig {
 	return zapcore.EncoderConfig{
-		TimeKey:        "timestamp",
-		LevelKey:       "level",
-		MessageKey:     "msg",
-		CallerKey:      "caller",
-		StacktraceKey:  "stacktrace",
-		EncodeLevel:    zapcore.LowercaseLevelEncoder,
-		EncodeTime:     zapcore.ISO8601TimeEncoder,
+		TimeKey:       "timestamp",
+		LevelKey:      "level",
+		MessageKey:    "msg",
+		CallerKey:     "caller",
+		StacktraceKey: "stacktrace",
+		EncodeLevel:   zapcore.LowercaseLevelEncoder,
+		EncodeTime: func(value time.Time, encoder zapcore.PrimitiveArrayEncoder) {
+			encoder.AppendString(transactionlog.FormatJakartaTime(value))
+		},
 		EncodeDuration: zapcore.SecondsDurationEncoder,
 		EncodeCaller:   zapcore.ShortCallerEncoder,
 	}

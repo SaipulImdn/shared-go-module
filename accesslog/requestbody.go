@@ -5,25 +5,19 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"strings"
+
+	"github.com/SaipulImdn/pixora-module/transactionlog"
 )
 
 // DefaultMaxRequestBody is the largest request body CaptureRequestBody will
 // log in full; anything at or above this size is reported by size only.
 const DefaultMaxRequestBody = 4096
 
-// sensitiveFields matches common credential-carrying JSON keys so
-// CaptureRequestBody never writes a password/token/etc. to disk or Loki.
-// `_?` between compound words matches both camelCase and snake_case payloads
-// (e.g. accessToken and access_token) since services vary in convention.
-var sensitiveFields = regexp.MustCompile(`(?i)"(password|token|secret|otp|pin|id_?token|api_?key|access_?token|refresh_?token)"\s*:\s*"[^"]*"`)
-
 // CaptureRequestBody reads a request's JSON body for access-log purposes and
 // restores r.Body so the real handler still sees it unchanged. It never
 // buffers what it shouldn't:
-//   - multipart/form-data and octet-stream bodies (file uploads) are reported
-//     by size only;
+//   - non-JSON bodies, including file uploads, are reported by size only;
 //   - a body of unknown length (chunked, no Content-Length) is left
 //     completely untouched — never read, never logged;
 //   - a body at or above maxBody bytes (0 = DefaultMaxRequestBody) is
@@ -40,13 +34,16 @@ func CaptureRequestBody(r *http.Request, maxBody int) (body string, size int64) 
 	if r.Body == nil {
 		return "", 0
 	}
-
-	contentType := r.Header.Get("Content-Type")
-	if strings.Contains(contentType, "multipart/form-data") || strings.Contains(contentType, "octet-stream") {
-		return "[binary/multipart]", r.ContentLength
-	}
 	if r.ContentLength <= 0 {
 		return "", 0
+	}
+
+	contentType := strings.ToLower(r.Header.Get("Content-Type"))
+	if !strings.Contains(contentType, "json") {
+		if strings.Contains(contentType, "multipart/form-data") || strings.Contains(contentType, "octet-stream") {
+			return "[binary/multipart]", r.ContentLength
+		}
+		return "[omitted: non-JSON body]", r.ContentLength
 	}
 	if r.ContentLength >= int64(maxBody) {
 		return fmt.Sprintf("[large body: %d bytes]", r.ContentLength), r.ContentLength
@@ -60,5 +57,5 @@ func CaptureRequestBody(r *http.Request, maxBody int) (body string, size int64) 
 	if len(bodyBytes) == 0 {
 		return "", 0
 	}
-	return string(sensitiveFields.ReplaceAll(bodyBytes, []byte(`"$1":"***"`))), int64(len(bodyBytes))
+	return transactionlog.SanitizeJSONText(bodyBytes, maxBody), int64(len(bodyBytes))
 }

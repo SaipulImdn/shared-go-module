@@ -11,7 +11,9 @@
 package accesslog
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"strconv"
@@ -22,13 +24,11 @@ import (
 
 	"github.com/SaipulImdn/pixora-module/metrics"
 	"github.com/SaipulImdn/pixora-module/reqid"
+	"github.com/SaipulImdn/pixora-module/transactionlog"
 )
 
 // maxCaptureSize is the maximum response body bytes buffered for envelope extraction.
 const maxCaptureSize = 4096
-
-// maxResponseDataSize is the max size for response.data before truncation.
-const maxResponseDataSize = 2048
 
 // Config controls the middleware's behavior.
 type Config struct {
@@ -42,6 +42,10 @@ type Config struct {
 	// "user_id" log field, e.g. after an auth middleware has already run and
 	// populated the context. Optional — if nil, "user_id" logs as "".
 	UserID func(ctx context.Context) string
+	// UserName extracts a trusted username from authenticated context. Optional.
+	UserName func(ctx context.Context) string
+	// OmitBody can suppress body logging for routes that serve sensitive data.
+	OmitBody func(path string) bool
 	// Metrics, if set, records the standard HTTP metric set (see the metrics
 	// package) for every non-skipped request — request count, duration,
 	// response code, and active-connection gauge — so services don't need to
@@ -81,26 +85,31 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 			ctx := reqid.WithID(r.Context(), id)
 			r = r.WithContext(ctx)
 
+			started := time.Now()
 			clientIP := extractClientIP(r)
-			reqBody, reqBodySize := CaptureRequestBody(r, 0)
+			omitBody := cfg.OmitBody != nil && cfg.OmitBody(r.URL.Path)
+			var requestBody string
+			var reqBodySize int64
+			if omitBody {
+				requestBody, reqBodySize = "[body logging disabled]", r.ContentLength
+			} else {
+				requestBody, reqBodySize = CaptureRequestBody(r, 0)
+			}
 
 			if cfg.Metrics != nil {
 				cfg.Metrics.IncActive()
 				defer cfg.Metrics.DecActive()
 			}
 
-			start := time.Now()
 			sw := &statusWriter{ResponseWriter: w, status: http.StatusOK, body: make([]byte, 0, maxCaptureSize)}
 
 			next.ServeHTTP(sw, r)
 
-			duration := time.Since(start)
-
+			finished := time.Now()
+			duration := finished.Sub(started)
 			responseCode := extractStringField(sw.body, "response_code")
-			responseDesc := extractStringField(sw.body, "response_desc")
-			responseData := extractResponseField(sw.body, "response_data")
-			if len(responseData) > maxResponseDataSize {
-				responseData = responseData[:maxResponseDataSize] + "...[truncated]"
+			if responseCode == "" {
+				responseCode = strconv.Itoa(sw.status)
 			}
 
 			var userID string
@@ -112,33 +121,42 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 				cfg.Metrics.Observe(r.Method, metrics.NormalizePath(r.URL.Path), strconv.Itoa(sw.status), responseCode, duration)
 			}
 
-			fields := []zap.Field{
-				zap.String("service", cfg.ServiceName),
-				zap.String("request_id", id),
-				zap.String("method", r.Method),
-				zap.String("path", r.URL.Path),
-				zap.Float64("duration", duration.Seconds()),
-				zap.String("client_ip", clientIP),
-				zap.String("user_id", userID),
-				zap.String("request.content_type", r.Header.Get("Content-Type")),
-				zap.String("request.body", reqBody),
-				zap.Int64("request.body_size", reqBodySize),
-				zap.String("response.code", responseCode),
-				zap.String("response.desc", responseDesc),
-				zap.String("response.data", responseData),
-				zap.Int("response.body_size", sw.size),
+			username := ""
+			if cfg.UserName != nil {
+				username = cfg.UserName(r.Context())
 			}
-
-			switch {
-			case sw.status >= 500:
-				cfg.Logger.Error("request", fields...)
-			case sw.status >= 400:
-				cfg.Logger.Warn("request", fields...)
-			case duration >= time.Second:
-				cfg.Logger.Info("request", fields...)
-			default:
-				cfg.Logger.Debug("request", fields...)
+			var requestBytes []byte
+			if requestBody != "" && !strings.HasPrefix(requestBody, "[") {
+				requestBytes = []byte(requestBody)
+			} else if requestBody != "" {
+				requestBytes = transactionlog.OmittedBody(strings.Trim(requestBody, "[]"), reqBodySize)
 			}
+			responseBytes := sw.body
+			if sw.size > maxCaptureSize {
+				responseBytes = transactionlog.OmittedBody("body exceeds log limit", int64(sw.size))
+			} else if sw.size > 0 && len(responseBytes) == 0 {
+				responseBytes = transactionlog.OmittedBody("non-JSON response body", int64(sw.size))
+			}
+			requestHeader := transactionlog.RequestHeader{
+				DeviceID: r.Header.Get("X-Device-ID"), DeviceModel: r.Header.Get("X-Device-Model"),
+				AppVersion: r.Header.Get("X-App-Version"), OSVersion: r.Header.Get("X-OS-Version"), IPAddress: clientIP,
+			}
+			requestHeader.DeviceType, _ = strconv.Atoi(r.Header.Get("X-Device-Type"))
+			if requestHeader.DeviceType != 1 && requestHeader.DeviceType != 2 {
+				requestHeader.DeviceType = 0
+			}
+			entry := transactionlog.NewEvent(
+				cfg.ServiceName, r.Method, r.URL.Path, id, r.Header.Get("X-Session-ID"), username, userID,
+				sw.status, responseCode, started, finished, requestHeader, requestBytes, responseBytes,
+				reqBodySize, int64(sw.size), omitBody,
+			)
+			if label := cleanLabel(r.Header.Get("X-Transaction-Type")); label != "" {
+				entry.Transaction = label
+			}
+			if label := cleanLabel(r.Header.Get("X-Transaction-Feature")); label != "" {
+				entry.Feature = label
+			}
+			transactionlog.Log(cfg.Logger, entry)
 		})
 	}
 }
@@ -166,6 +184,19 @@ func extractClientIP(r *http.Request) string {
 	return host
 }
 
+func cleanLabel(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 64 {
+		return ""
+	}
+	for _, char := range value {
+		if char < 0x20 || char == 0x7f {
+			return ""
+		}
+	}
+	return value
+}
+
 // ─── Response Writer Wrapper ─────────────────────────────────────────────────
 
 type statusWriter struct {
@@ -191,7 +222,7 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
 	n, err := sw.ResponseWriter.Write(b)
 	sw.size += n
 
-	if len(sw.body) < maxCaptureSize {
+	if responseIsJSON(sw.Header().Get("Content-Type"), b, len(sw.body) > 0) && len(sw.body) < maxCaptureSize {
 		remaining := maxCaptureSize - len(sw.body)
 		if len(b) > remaining {
 			sw.body = append(sw.body, b[:remaining]...)
@@ -201,6 +232,21 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
 	}
 
 	return n, err
+}
+
+func responseIsJSON(contentType string, body []byte, alreadyCaptured bool) bool {
+	contentType = strings.ToLower(contentType)
+	if strings.Contains(contentType, "json") {
+		return true
+	}
+	if contentType != "" {
+		return false
+	}
+	if alreadyCaptured {
+		return true
+	}
+	first := bytes.TrimSpace(body)
+	return len(first) > 0 && (first[0] == '{' || first[0] == '[')
 }
 
 func (sw *statusWriter) Flush() {
@@ -220,26 +266,15 @@ func extractStringField(body []byte, field string) string {
 	if len(body) == 0 {
 		return ""
 	}
-
-	s := string(body)
-	key := `"` + field + `":"`
-
-	idx := strings.Index(s, key)
-	if idx == -1 {
+	var values map[string]json.RawMessage
+	if json.Unmarshal(body, &values) != nil {
 		return ""
 	}
-
-	start := idx + len(key)
-	if start >= len(s) {
+	var value string
+	if json.Unmarshal(values[field], &value) != nil {
 		return ""
 	}
-
-	end := strings.IndexByte(s[start:], '"')
-	if end == -1 || end > 500 {
-		return ""
-	}
-
-	return s[start : start+end]
+	return value
 }
 
 // extractResponseField extracts a field's raw JSON value (object, array,

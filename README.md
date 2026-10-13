@@ -1,10 +1,8 @@
 # pixora-module
 
 Shared Go library for logging, distributed request tracing, and HTTP access
-logs across the Ceriku platform's independent service repos (axe-gateway,
-pixora-backend, clockwerk-media, rubick-profile, invoker-activity,
-wisp-notifier, phantom-dedup-engine). One standard instead of seven
-near-identical copies.
+logs across Ceriku's independent service repos. One standard instead of
+service-specific logging formats.
 
 ```
 go get github.com/SaipulImdn/pixora-module
@@ -54,6 +52,22 @@ Domain-specific metrics (e.g. `phantom_files_indexed_total`,
 `rubick_password_resets_total`) stay in each service — only the generic HTTP
 set belongs here.
 
+### `transactionlog`
+
+The common structured event schema and outbound HTTP transport. Events use
+Jakarta timestamps and include `trx_type`, `trx_feature`, `service`,
+`time_in`, `time_out`, `time_response`, `request_id`, `session_id`,
+`username`, `user_id`, `rc`, `http_code`, `request_header`, `request_body`,
+and `response_body`. JSON capture is capped at 4 KiB; credentials are removed
+and account/payment identifiers are masked. Binary, unknown-length, and
+oversized bodies are represented by an omission marker and byte count.
+
+Wrap custom `http.RoundTripper`s with `transactionlog.NewTransport`, or call
+`InstallDefaultTransport` once at startup. Each downstream call emits a
+separate `http.client.completed` event with the same request ID, its endpoint,
+HTTP result, and response time. This keeps fan-out and retries searchable in
+Loki without fixed `s_1`/`s_2` fields.
+
 ### `accesslog`
 
 The shared HTTP access-log middleware. Wrap it as close to the outermost
@@ -75,13 +89,10 @@ mw := accesslog.Middleware(accesslog.Config{
 handler = mw(handler)
 ```
 
-Every request logs one structured line with a standard field set: `service`,
-`request_id`, `method`, `path`, `duration`, `client_ip`, `user_id`,
-`request.content_type`, `response.code`, `response.desc`, `response.data`,
-`response.body_size` — extracted from the `{responseCode, responseDesc,
-responseData}` envelope every Ceriku service already replies with. Log level
-is chosen automatically: error on 5xx, warn on 4xx, info if the request took
-≥1s, debug otherwise.
+Every request logs the `transactionlog.Event` schema. Authenticated `user_id`
+and `username` are read only from callbacks backed by the service's verified
+auth context; fields remain empty when that identity is unavailable. HTTP
+health and metrics paths are skipped by each service's config.
 
 `accesslog`'s client-IP extraction is deliberately simple (`X-Forwarded-For` /
 `X-Real-Ip` / `RemoteAddr`, no trusted-proxy allowlist) — every Ceriku backend
