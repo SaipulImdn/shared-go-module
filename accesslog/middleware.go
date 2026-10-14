@@ -83,10 +83,20 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 			id := reqid.FromHeaderOrGenerate(r.Header.Get(reqid.Header))
 			w.Header().Set(reqid.Header, id)
 			ctx := reqid.WithID(r.Context(), id)
+			ctx = transactionlog.WithIdentity(ctx, r.Header.Get("X-User-ID"), r.Header.Get("X-Username"), r.Header.Get("X-Session-ID"))
+			clientIP := extractClientIP(r)
+			requestHeader := transactionlog.RequestHeader{
+				DeviceID: r.Header.Get("X-Device-ID"), DeviceModel: r.Header.Get("X-Device-Model"),
+				AppVersion: r.Header.Get("X-App-Version"), OSVersion: r.Header.Get("X-OS-Version"), IPAddress: clientIP,
+			}
+			requestHeader.DeviceType, _ = strconv.Atoi(r.Header.Get("X-Device-Type"))
+			if requestHeader.DeviceType != 1 && requestHeader.DeviceType != 2 {
+				requestHeader.DeviceType = 0
+			}
+			ctx = transactionlog.WithRequestHeader(ctx, requestHeader)
 			r = r.WithContext(ctx)
 
 			started := time.Now()
-			clientIP := extractClientIP(r)
 			omitBody := cfg.OmitBody != nil && cfg.OmitBody(r.URL.Path)
 			var requestBody string
 			var reqBodySize int64
@@ -107,43 +117,42 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 
 			finished := time.Now()
 			duration := finished.Sub(started)
-			responseCode := extractStringField(sw.body, "response_code")
+			responseCode := extractStringField(sw.body, "response_code", "responseCode", "rc")
 			if responseCode == "" {
 				responseCode = strconv.Itoa(sw.status)
 			}
 
-			var userID string
+			userID := r.Header.Get("X-User-ID")
 			if cfg.UserID != nil {
-				userID = cfg.UserID(r.Context())
+				if value := cfg.UserID(r.Context()); value != "" {
+					userID = value
+				}
 			}
 
 			if cfg.Metrics != nil {
-				cfg.Metrics.Observe(r.Method, metrics.NormalizePath(r.URL.Path), strconv.Itoa(sw.status), responseCode, duration)
+				normalizedPath := transactionlog.NormalizeEndpoint(r.URL.Path)
+				cfg.Metrics.Observe(r.Method, normalizedPath, strconv.Itoa(sw.status), responseCode, duration)
 			}
 
-			username := ""
+			username := r.Header.Get("X-Username")
 			if cfg.UserName != nil {
-				username = cfg.UserName(r.Context())
+				if value := cfg.UserName(r.Context()); value != "" {
+					username = value
+				}
 			}
 			var requestBytes []byte
-			if requestBody != "" && !strings.HasPrefix(requestBody, "[") {
-				requestBytes = []byte(requestBody)
-			} else if requestBody != "" {
-				requestBytes = transactionlog.OmittedBody(strings.Trim(requestBody, "[]"), reqBodySize)
+			if requestBody != "" {
+				if json.Valid([]byte(requestBody)) {
+					requestBytes = []byte(requestBody)
+				} else {
+					requestBytes = transactionlog.OmittedBody(strings.Trim(requestBody, "[]"), reqBodySize)
+				}
 			}
 			responseBytes := sw.body
 			if sw.size > maxCaptureSize {
 				responseBytes = transactionlog.OmittedBody("body exceeds log limit", int64(sw.size))
 			} else if sw.size > 0 && len(responseBytes) == 0 {
 				responseBytes = transactionlog.OmittedBody("non-JSON response body", int64(sw.size))
-			}
-			requestHeader := transactionlog.RequestHeader{
-				DeviceID: r.Header.Get("X-Device-ID"), DeviceModel: r.Header.Get("X-Device-Model"),
-				AppVersion: r.Header.Get("X-App-Version"), OSVersion: r.Header.Get("X-OS-Version"), IPAddress: clientIP,
-			}
-			requestHeader.DeviceType, _ = strconv.Atoi(r.Header.Get("X-Device-Type"))
-			if requestHeader.DeviceType != 1 && requestHeader.DeviceType != 2 {
-				requestHeader.DeviceType = 0
 			}
 			entry := transactionlog.NewEvent(
 				cfg.ServiceName, r.Method, r.URL.Path, id, r.Header.Get("X-Session-ID"), username, userID,
@@ -262,7 +271,7 @@ func (sw *statusWriter) Unwrap() http.ResponseWriter {
 // ─── Response Envelope Extraction ────────────────────────────────────────────
 
 // extractStringField extracts a simple "key":"value" string field from JSON bytes.
-func extractStringField(body []byte, field string) string {
+func extractStringField(body []byte, fields ...string) string {
 	if len(body) == 0 {
 		return ""
 	}
@@ -270,11 +279,13 @@ func extractStringField(body []byte, field string) string {
 	if json.Unmarshal(body, &values) != nil {
 		return ""
 	}
-	var value string
-	if json.Unmarshal(values[field], &value) != nil {
-		return ""
+	for _, field := range fields {
+		var value string
+		if json.Unmarshal(values[field], &value) == nil && value != "" {
+			return value
+		}
 	}
-	return value
+	return ""
 }
 
 // extractResponseField extracts a field's raw JSON value (object, array,

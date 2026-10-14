@@ -288,7 +288,7 @@ func sanitizeValue(value any) {
 }
 
 func isCredential(key string) bool {
-	for _, part := range []string{"password", "passwd", "token", "secret", "pin", "apikey", "authorization", "cookie", "signature", "credential", "privatekey", "presigned", "signedurl"} {
+	for _, part := range []string{"password", "passwd", "token", "secret", "pin", "apikey", "authorization", "cookie", "signature", "credential", "privatekey", "presigned", "signedurl", "proofdataurl", "proofimage", "proofurl", "buktitransfer"} {
 		if key == part || strings.HasSuffix(key, part) {
 			return true
 		}
@@ -309,7 +309,15 @@ func isFinancialIdentifier(key string) bool {
 	if strings.Contains(key, "amount") || strings.Contains(key, "balance") || strings.Contains(key, "accounttype") || strings.Contains(key, "accountname") {
 		return false
 	}
-	for _, part := range []string{"account", "rekening", "paymentnumber", "cardnumber", "msisdn", "phonenumber", "mobilephone"} {
+	if key == "bankaccount" {
+		return false
+	}
+	for _, part := range []string{"destinationaccount", "targetaccount", "beneficiaryaccount", "recipientaccount", "rekeningtujuan", "paymentnumber", "paymentno", "nomorpembayaran", "virtualaccount"} {
+		if strings.Contains(key, part) {
+			return false
+		}
+	}
+	for _, part := range []string{"account", "rekening", "cardnumber", "msisdn", "phonenumber", "mobilephone"} {
 		if strings.Contains(key, part) {
 			return true
 		}

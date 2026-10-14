@@ -47,12 +47,17 @@ func (t *loggedTransport) RoundTrip(request *http.Request) (*http.Response, erro
 		id = reqid.FromHeaderOrGenerate(request.Header.Get(reqid.Header))
 	}
 	request.Header.Set(reqid.Header, id)
+	userID, username := IdentityFromContext(request.Context())
+	sessionID := request.Header.Get("X-Session-ID")
+	if sessionID == "" {
+		sessionID = SessionIDFromContext(request.Context())
+	}
 	started := time.Now()
 	body, bodySize := outgoingBody(request)
 	response, err := t.base.RoundTrip(request)
 	if err != nil {
 		finished := time.Now()
-		entry := NewEvent(t.service, request.Method, requestPath(request), id, request.Header.Get("X-Session-ID"), "", "", 0, "transport_error", started, finished, requestHeader(request), body, OmittedBody("upstream request failed", 0), bodySize, 0, false)
+		entry := NewEvent(t.service, request.Method, requestPath(request), id, sessionID, username, userID, 0, "transport_error", started, finished, requestHeader(request), body, OmittedBody("upstream request failed", 0), bodySize, 0, false)
 		entry.Event = "http.client.completed"
 		entry.Level = "error"
 		entry.UpstreamService = request.URL.Host
@@ -64,7 +69,7 @@ func (t *loggedTransport) RoundTrip(request *http.Request) (*http.Response, erro
 	}
 	response.Body = &loggedResponseBody{
 		ReadCloser: response.Body, logger: t.logger, service: t.service, request: request,
-		requestID: id, requestBody: body, requestSize: bodySize, started: started,
+		requestID: id, sessionID: sessionID, username: username, userID: userID, requestBody: body, requestSize: bodySize, started: started,
 		status: response.StatusCode, contentType: response.Header.Get("Content-Type"), upstream: request.URL.Host,
 	}
 	return response, nil
@@ -82,6 +87,9 @@ type loggedResponseBody struct {
 	service      string
 	request      *http.Request
 	requestID    string
+	sessionID    string
+	username     string
+	userID       string
 	requestBody  []byte
 	requestSize  int64
 	started      time.Time
@@ -127,13 +135,22 @@ func (body *loggedResponseBody) finish() {
 		}
 		rc := strconv.Itoa(body.status)
 		var envelope struct {
-			ResponseCode string `json:"response_code"`
+			ResponseCode      string `json:"response_code"`
+			ResponseCodeCamel string `json:"responseCode"`
+			RC                string `json:"rc"`
 		}
-		if json.Unmarshal(responseBody, &envelope) == nil && envelope.ResponseCode != "" {
-			rc = envelope.ResponseCode
+		if json.Unmarshal(responseBody, &envelope) == nil {
+			switch {
+			case envelope.ResponseCode != "":
+				rc = envelope.ResponseCode
+			case envelope.ResponseCodeCamel != "":
+				rc = envelope.ResponseCodeCamel
+			case envelope.RC != "":
+				rc = envelope.RC
+			}
 		}
 		entry := NewEvent(body.service, body.request.Method, requestPath(body.request), body.requestID,
-			body.request.Header.Get("X-Session-ID"), "", "", body.status, rc, body.started, finished,
+			body.sessionID, body.username, body.userID, body.status, rc, body.started, finished,
 			requestHeader(body.request), body.requestBody, responseBody, body.requestSize, body.responseSize, false)
 		entry.Event = "http.client.completed"
 		entry.UpstreamService = body.upstream
@@ -165,11 +182,31 @@ func requestHeader(request *http.Request) RequestHeader {
 	if deviceType != 1 && deviceType != 2 {
 		deviceType = 0
 	}
-	return RequestHeader{
+	header := RequestHeader{
 		DeviceID: request.Header.Get("X-Device-ID"), DeviceType: deviceType,
 		DeviceModel: request.Header.Get("X-Device-Model"), AppVersion: request.Header.Get("X-App-Version"),
 		OSVersion: request.Header.Get("X-OS-Version"), IPAddress: firstIP(request.Header.Get("X-Forwarded-For")),
 	}
+	original := RequestHeaderFromContext(request.Context())
+	if header.DeviceID == "" {
+		header.DeviceID = original.DeviceID
+	}
+	if header.DeviceType == 0 {
+		header.DeviceType = original.DeviceType
+	}
+	if header.DeviceModel == "" {
+		header.DeviceModel = original.DeviceModel
+	}
+	if header.AppVersion == "" {
+		header.AppVersion = original.AppVersion
+	}
+	if header.OSVersion == "" {
+		header.OSVersion = original.OSVersion
+	}
+	if header.IPAddress == "" {
+		header.IPAddress = original.IPAddress
+	}
+	return header
 }
 
 func endpoint(request *http.Request) string {
