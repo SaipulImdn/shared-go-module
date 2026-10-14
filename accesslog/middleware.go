@@ -318,7 +318,7 @@ func extractResponseField(body []byte, field string) string {
 	if s[start] == '"' {
 		start++
 		end := strings.IndexByte(s[start:], '"')
-		if end == -1 || end > maxResponseDataSize+100 {
+		if end == -1 || end > maxCaptureSize+100 {
 			return ""
 		}
 		return s[start : start+end]
