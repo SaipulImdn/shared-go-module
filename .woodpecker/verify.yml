@@ -1,0 +1,76 @@
+clone:
+- name: git
+  image: docker.io/woodpeckerci/plugin-git:2.10.1@sha256:550075c844fcec0af41d9d28f9860aa5d8c43e1e9419be4b9266dc02c2f29804
+  settings:
+    depth: '0'
+  backend_options:
+    kubernetes:
+      hostUsers: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+          - ALL
+        seccompProfile:
+          type: RuntimeDefault
+when:
+- event:
+  - pull_request
+  - push
+  branch: main
+steps:
+- name: go-quality
+  image: docker.io/library/golang:1.26.10-alpine@sha256:27f2d3b83cfc5803c8078f8e730af0f7c431bf067afaec8f60a36fb763187cba
+  commands:
+  - "set -eu\ndisk_guard() {\n  checked_devices=\" \"\n  for disk_path in \"$PWD\" / /tmp; do\n    [ -e \"$disk_path\" ] || continue\n    set -- $(df -Pk \"$disk_path\" | awk 'NR == 2 { print $1, $2, $4 }')\n    device=$1\n    case \"$checked_devices\" in *\" $device \"*) continue ;; esac\n    checked_devices=\"$checked_devices$device \"\n    total_bytes=$(($2 * 1024))\n    free_bytes=$(($3 * 1024))\n    min_free=$((total_bytes / 5))\n    if [ \"$free_bytes\" -le \"$min_free\" ]; then\n      echo \"Disk safety gate: refusing work; need at least $min_free bytes free on $device (currently $free_bytes).\" >&2\n      exit 1\n    fi\n    echo \"Disk safety gate passed: $free_bytes bytes free on $device.\"\n  done\n}\ndisk_guard\nset -eu\nexport GOPATH=/tmp/go GOCACHE=/tmp/go-build GOBIN=/tmp/go/bin\nmkdir -p \"$GOBIN\" \"$GOCACHE\"\ngo version\ngo mod verify\ngo mod tidy -diff\ngo vet ./...\ngo test -count=1 ./...\ngo install golang.org/x/vuln/cmd/govulncheck@v1.7.0\n/tmp/go/bin/govulncheck ./...\n"
+  backend_options:
+    kubernetes:
+      hostUsers: false
+      resources:
+        requests:
+          cpu: 250m
+          memory: 1Gi
+          ephemeral-storage: 2Gi
+        limits:
+          cpu: '2'
+          memory: 3Gi
+          ephemeral-storage: 6Gi
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+          - ALL
+        seccompProfile:
+          type: RuntimeDefault
+- name: source-security-scan
+  image: docker.io/aquasec/trivy:0.69.3@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c
+  commands:
+  - "set -eu\ndisk_guard() {\n  checked_devices=\" \"\n  for disk_path in \"$PWD\" / /tmp; do\n    [ -e \"$disk_path\" ] || continue\n    set -- $(df -Pk \"$disk_path\" | awk 'NR == 2 { print $1, $2, $4 }')\n    device=$1\n    case \"$checked_devices\" in *\" $device \"*) continue ;; esac\n    checked_devices=\"$checked_devices$device \"\n    total_bytes=$(($2 * 1024))\n    free_bytes=$(($3 * 1024))\n    min_free=$((total_bytes / 5))\n    if [ \"$free_bytes\" -le \"$min_free\" ]; then\n      echo \"Disk safety gate: refusing work; need at least $min_free bytes free on $device (currently $free_bytes).\" >&2\n      exit 1\n    fi\n    echo \"Disk safety gate passed: $free_bytes bytes free on $device.\"\n  done\n}\ndisk_guard\nset -eu\ntrivy fs --cache-dir /tmp/trivy-cache --scanners vuln,misconfig,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 .\n"
+  backend_options:
+    kubernetes:
+      hostUsers: false
+      resources:
+        requests:
+          cpu: 250m
+          memory: 512Mi
+          ephemeral-storage: 512Mi
+        limits:
+          cpu: '1'
+          memory: 2Gi
+          ephemeral-storage: 2Gi
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop:
+          - ALL
+        seccompProfile:
+          type: RuntimeDefault
