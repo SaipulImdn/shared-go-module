@@ -129,9 +129,9 @@ func (body *loggedResponseBody) finish() {
 		finished := time.Now()
 		responseBody := body.response.Bytes()
 		if !isJSON(body.contentType) && body.responseSize > 0 {
-			responseBody = OmittedBody("non-JSON response body", body.responseSize)
-		} else if body.responseSize > DefaultBodyLimit {
-			responseBody = OmittedBody("body exceeds log limit", body.responseSize)
+			responseBody = OmittedBodyType("non-JSON response body", body.responseSize, body.contentType)
+		} else if body.responseSize > int64(DefaultBodyLimit) {
+			responseBody = TruncatedBody(responseBody, body.responseSize)
 		}
 		rc := strconv.Itoa(body.status)
 		var envelope struct {
@@ -166,7 +166,7 @@ func outgoingBody(request *http.Request) ([]byte, int64) {
 	if request.Body == nil || !isJSON(request.Header.Get("Content-Type")) || request.ContentLength <= 0 {
 		return nil, max64(0, request.ContentLength)
 	}
-	if request.ContentLength > DefaultBodyLimit {
+	if request.ContentLength > int64(DefaultBodyLimit) {
 		return OmittedBody("body exceeds log limit", request.ContentLength), request.ContentLength
 	}
 	raw, err := io.ReadAll(request.Body)

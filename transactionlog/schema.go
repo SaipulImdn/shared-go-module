@@ -5,11 +5,41 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
-const DefaultBodyLimit = 4096
+// Body limits. A log line must stay under Loki's 256 KiB line limit with a request
+// AND a response body in it, so the per-body ceiling is 96 KiB.
+const (
+	minBodyLimit     = 1024
+	maxBodyLimit     = 96 * 1024
+	defaultBodyLimit = 64 * 1024
+	previewBytes     = 2048
+)
+
+// DefaultBodyLimit is the most body bytes captured per request or response in
+// one log line (default 64 KiB). Set LOG_BODY_LIMIT_BYTES to change it (clamped
+// to 1 KiB..96 KiB). Bodies above it are logged as a masked preview plus the size.
+var DefaultBodyLimit = bodyLimitFromEnv()
+
+func bodyLimitFromEnv() int {
+	n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("LOG_BODY_LIMIT_BYTES")))
+	if err != nil || n <= 0 {
+		return defaultBodyLimit
+	}
+	if n < minBodyLimit {
+		return minBodyLimit
+	}
+	if n > maxBodyLimit {
+		return maxBodyLimit
+	}
+	return n
+}
 
 var jakarta = func() *time.Location {
 	loc, err := time.LoadLocation("Asia/Jakarta")
@@ -57,6 +87,8 @@ type Event struct {
 	Username         string        `json:"username"`
 	UserID           string        `json:"user_id"`
 	RC               string        `json:"rc"`
+	ResponseCode     string        `json:"response_code"`
+	ResponseDesc     string        `json:"response_desc"`
 	HTTPCode         int           `json:"http_code"`
 	RequestHeader    RequestHeader `json:"request_header"`
 	RequestBody      any           `json:"request_body"`
@@ -120,7 +152,8 @@ func NewEvent(service, method, path, requestID, sessionID, username, userID stri
 		TimeIn: FormatJakartaTime(started), TimeOut: FormatJakartaTime(finished),
 		TimeResponse: ms, ResponseTime: ms, RequestID: requestID, RequestIDLegacy: requestID,
 		SessionID: sessionID, SessionIDLegacy: sessionID,
-		Username: username, UserID: userID, RC: rc, HTTPCode: status, RequestHeader: headers,
+		Username: username, UserID: userID, RC: rc, ResponseCode: rc, ResponseDesc: responseDesc(responseValue),
+		HTTPCode: status, RequestHeader: headers,
 		RequestBody: requestValue, ResponseBody: responseValue,
 		RequestBodySize: requestBodySize, ResponseBodySize: responseBodySize,
 		Method: method, Path: NormalizeEndpoint(path), Route: NormalizeEndpoint(path), Status: status, Duration: ms,
@@ -235,8 +268,7 @@ func sanitize(body []byte, limit int) []byte {
 		return []byte(`{}`)
 	}
 	if len(body) > limit {
-		b, _ := json.Marshal(map[string]any{"omitted": "body exceeds log limit", "size": len(body)})
-		return b
+		return TruncatedBody(body[:limit], int64(len(body)))
 	}
 	var value any
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -346,4 +378,65 @@ func lastFour(value string) string {
 		return value
 	}
 	return value[len(value)-4:]
+}
+
+// TruncatedBody describes a body that exceeded the log limit: its size, the
+// limit, and a short preview of the start with credentials masked. prefix is
+// whatever was captured of the body (at most the limit); total is the real size.
+func TruncatedBody(prefix []byte, total int64) []byte {
+	n := len(prefix)
+	if n > previewBytes {
+		n = previewBytes
+	}
+	preview := strings.ToValidUTF8(string(prefix[:n]), "")
+	value, _ := json.Marshal(map[string]any{
+		"omitted": "body exceeds log limit", "size": max64(total, 0), "limit": DefaultBodyLimit,
+		"preview": maskRaw(preview),
+	})
+	return value
+}
+
+// OmittedBodyType is OmittedBody plus the content type, for bodies that are not
+// logged because they are binary (images, video, archives, uploads).
+func OmittedBodyType(reason string, size int64, contentType string) []byte {
+	m := map[string]any{"omitted": reason, "size": max64(size, 0)}
+	if contentType = strings.TrimSpace(contentType); contentType != "" {
+		m["content_type"] = contentType
+	}
+	value, _ := json.Marshal(m)
+	return value
+}
+
+var (
+	rawCredentialJSON = regexp.MustCompile(`(?i)("[a-z0-9_\-]*(?:password|passwd|token|secret|pin|apikey|authorization|cookie|signature|credential|privatekey|presigned|signedurl|otp)[a-z0-9_\-]*"\s*:\s*)"[^"]*"`)
+	rawCredentialURL  = regexp.MustCompile(`(?i)(x-amz-signature|x-amz-credential|x-amz-security-token|access_token|refresh_token|signature|token)=[^&"\s]+`)
+)
+
+// maskRaw masks credentials in text that could not be parsed as JSON (a
+// truncated preview), where the key-based JSON sanitizer cannot run.
+func maskRaw(text string) string {
+	text = rawCredentialJSON.ReplaceAllString(text, `$1"***"`)
+	return rawCredentialURL.ReplaceAllString(text, `$1=***`)
+}
+
+// responseDesc reads the human-readable description from a JSON response body
+// ({"response_desc": ...} / {"responseDesc": ...} / {"message": ...}).
+func responseDesc(body string) string {
+	if !strings.HasPrefix(strings.TrimSpace(body), "{") {
+		return ""
+	}
+	var env map[string]json.RawMessage
+	if json.Unmarshal([]byte(body), &env) != nil {
+		return ""
+	}
+	for _, key := range []string{"response_desc", "responseDesc", "message"} {
+		var v string
+		if raw, ok := env[key]; ok && json.Unmarshal(raw, &v) == nil && v != "" {
+			if !utf8.ValidString(v) {
+				v = strings.ToValidUTF8(v, "")
+			}
+			return v
+		}
+	}
+	return ""
 }

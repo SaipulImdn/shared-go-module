@@ -11,8 +11,9 @@ import (
 )
 
 // DefaultMaxRequestBody is the largest request body CaptureRequestBody will
-// log in full; anything at or above this size is reported by size only.
-const DefaultMaxRequestBody = 4096
+// log in full (LOG_BODY_LIMIT_BYTES, default 64 KiB); anything at or above this
+// size is reported by size only.
+var DefaultMaxRequestBody = transactionlog.DefaultBodyLimit
 
 // CaptureRequestBody reads a request's JSON body for access-log purposes and
 // restores r.Body so the real handler still sees it unchanged. It never
