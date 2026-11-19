@@ -27,8 +27,9 @@ import (
 	"github.com/SaipulImdn/pixora-module/transactionlog"
 )
 
-// maxCaptureSize is the maximum response body bytes buffered for envelope extraction.
-const maxCaptureSize = 4096
+// captureLimit is the most response body bytes buffered per request: the same
+// limit that bounds what a log line carries (LOG_BODY_LIMIT_BYTES, default 64 KiB).
+func captureLimit() int { return transactionlog.DefaultBodyLimit }
 
 // Config controls the middleware's behavior.
 type Config struct {
@@ -111,7 +112,7 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 				defer cfg.Metrics.DecActive()
 			}
 
-			sw := &statusWriter{ResponseWriter: w, status: http.StatusOK, body: make([]byte, 0, maxCaptureSize)}
+			sw := &statusWriter{ResponseWriter: w, status: http.StatusOK, body: make([]byte, 0, 1024), limit: captureLimit()}
 
 			next.ServeHTTP(sw, r)
 
@@ -149,10 +150,10 @@ func Middleware(cfg Config) func(http.Handler) http.Handler {
 				}
 			}
 			responseBytes := sw.body
-			if sw.size > maxCaptureSize {
-				responseBytes = transactionlog.OmittedBody("body exceeds log limit", int64(sw.size))
+			if sw.size > sw.limit && len(responseBytes) > 0 {
+				responseBytes = transactionlog.TruncatedBody(sw.body, int64(sw.size))
 			} else if sw.size > 0 && len(responseBytes) == 0 {
-				responseBytes = transactionlog.OmittedBody("non-JSON response body", int64(sw.size))
+				responseBytes = transactionlog.OmittedBodyType("non-JSON response body", int64(sw.size), sw.Header().Get("Content-Type"))
 			}
 			entry := transactionlog.NewEvent(
 				cfg.ServiceName, r.Method, r.URL.Path, id, r.Header.Get("X-Session-ID"), username, userID,
@@ -214,6 +215,7 @@ type statusWriter struct {
 	size        int
 	wroteHeader bool
 	body        []byte
+	limit       int
 }
 
 func (sw *statusWriter) WriteHeader(code int) {
@@ -231,8 +233,8 @@ func (sw *statusWriter) Write(b []byte) (int, error) {
 	n, err := sw.ResponseWriter.Write(b)
 	sw.size += n
 
-	if responseIsJSON(sw.Header().Get("Content-Type"), b, len(sw.body) > 0) && len(sw.body) < maxCaptureSize {
-		remaining := maxCaptureSize - len(sw.body)
+	if responseIsJSON(sw.Header().Get("Content-Type"), b, len(sw.body) > 0) && len(sw.body) < sw.limit {
+		remaining := sw.limit - len(sw.body)
 		if len(b) > remaining {
 			sw.body = append(sw.body, b[:remaining]...)
 		} else {
@@ -318,7 +320,7 @@ func extractResponseField(body []byte, field string) string {
 	if s[start] == '"' {
 		start++
 		end := strings.IndexByte(s[start:], '"')
-		if end == -1 || end > maxCaptureSize+100 {
+		if end == -1 || end > captureLimit()+100 {
 			return ""
 		}
 		return s[start : start+end]

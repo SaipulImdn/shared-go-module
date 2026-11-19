@@ -100,3 +100,14 @@ sits behind axe-gateway-pixora on an internal cluster network, not directly on
 the internet, so there's no untrusted hop to defend against at this layer.
 axe-gateway-pixora itself, being internet-facing, keeps its own stricter
 trusted-proxy-validated extractor rather than using this package's.
+
+## Request/response logging (transactionlog + accesslog)
+
+Every request logs one JSON line with `rc`/`response_code`, `response_desc`, `http_code`, and the
+request and response bodies. JSON bodies are logged **in full** up to `LOG_BODY_LIMIT_BYTES`
+(default 65536, clamped 1024..98304 so a line stays under Loki's 256 KiB limit). Larger bodies
+are logged as `{"omitted":"body exceeds log limit","size":N,"limit":L,"preview":"<first 2 KiB>"}`.
+Binary responses (images, video, downloads) are logged as `{"omitted":"non-JSON response body","size":N,"content_type":"..."}`.
+
+Credential fields (`password`, `*token`, `secret`, `pin`, `otp*`, `authorization`, `cookie`,
+`signature`, `presigned*`, ...) and account numbers are always masked as `***`, in the preview too.
